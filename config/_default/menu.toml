@@ -15,6 +15,22 @@ url = "https://github.com/hectorgabucio"
 [social.params]
 icon = "brand-github"
 
+[[social]]
+identifier = "website"
+name = "Personal website"
+url = "https://hectorgabucio.com"
+
+[social.params]
+icon = "world-www"
+
+[[social]]
+identifier = "linkedin"
+name = "LinkedIn"
+url = "https://www.linkedin.com/in/hectorjosecompangabucio"
+
+[social.params]
+icon = "brand-linkedin"
+
 #[[social]]
 #identifier = "twitter"
 #name = "Twitter"
