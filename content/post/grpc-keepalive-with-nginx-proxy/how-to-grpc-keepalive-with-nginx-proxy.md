@@ -116,9 +116,8 @@ After successfully testing locally, I deployed the solution to our test environm
 Even with airplane mode enabled on the phone, **the server was still receiving ACK responses to its PING frames. This was confusing because we knew the client was disconnected, but the server thought the connection was still alive.**
 
 <p align="center">
-<img alt="WTF meme" src="https://media2.giphy.com/media/v1.Y2lkPTc5MGI3NjExZHY4OHlsZTR4Z3BpeWltaThtenN1NHYzb2kxb2hocDZ3aG5vMm43cSZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/b8RQzkElbBsXqEPF2X/giphy.gif"
+<img alt="WTF meme" src="https://media2.giphy.com/media/v1.Y2lkPTc5MGI3NjExZHY4OHlsZTR4Z3BpeWltaThtenN1NHYzb2kxb2hocDZ3aG5vMm43cSZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/b8RQzkElbBsXqEPF2X/giphy.gif" />
 </p>
-
 
 ### Reproducing the Issue
 
@@ -160,7 +159,7 @@ grpc-server-1  | 2025/05/09 17:54:10 http2: Framer 0x40000e4540: read PING flags
 ```
 
 <p align="center">
-<img alt="Mystery meme" src="https://media.giphy.com/media/3o7btNa0RUYa5E7iiQ/giphy.gif" />
+<img alt="Mystery meme" src="https://media1.tenor.com/m/0UBIdauP8CoAAAAC/iker-jimenez-misterioso.gif" />
 </p>
 
 Who is responding to the pings when the client has airplane mode enabled?
@@ -201,7 +200,6 @@ Their conclusion was straightforward: HTTP/2 pings only help verify direct (peer
 ### The TCP Keepalive Alternative
 
 As a possible solution, they mentioned using TCP keepalive. However, I rejected this idea because TCP keepalive is notoriously difficult to maintain, with many edge cases to handle and debug. For a great example of these challenges, you can read this [insightful post from Cloudflare](https://blog.cloudflare.com/when-tcp-sockets-refuse-to-die/).
-
 
 ## The Problem
 
@@ -270,9 +268,9 @@ message Pong {
     int64 original_timestamp = 1;
     int64 server_timestamp = 2;
 }
-
 ```
-Please note the Ping and Pong messages: those are part of our home-made keepalive system.
+
+Please note the `Ping` and `Pong` messages: those are part of our home-made keepalive system.
 
 The custom ping mechanism works as follows:
 
@@ -286,6 +284,8 @@ The custom ping mechanism works as follows:
    - Terminates the connection if no pings are received within the expected interval
 
 This bidirectional ping mechanism ensures both sides can detect connection issues and take appropriate action.
+
+It is really simple to mantain and it works great, nginx will forward those messages since are just gRPC messages. 
 
 ## Best Practices
 
