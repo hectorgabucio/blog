@@ -15,6 +15,10 @@ categories:
     - networking
 ---
 
+## Intro
+
+Grab a coffee and join me on this journey through the challenges of implementing gRPC keepalive in a Go service behind an Nginx proxy. I'll share my experience, the problems I encountered, and how I found a solution that actually works in production.
+
 ## The Challenge
 
 In a recent project, I faced an interesting challenge: implementing a gRPC server stream that needed to maintain a healthy connection. This was particularly important because our client was a mobile application that could experience poor signal quality, intermittent data loss, and other connectivity issues. The natural approach would be to use gRPC's built-in keepalive mechanism, but there was a catch - we were using Nginx as a proxy.
