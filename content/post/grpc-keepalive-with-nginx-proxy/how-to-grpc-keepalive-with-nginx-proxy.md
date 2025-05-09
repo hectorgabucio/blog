@@ -216,13 +216,22 @@ Since the gRPC keepalive can be enabled on the server side as well, it creates a
 3. Nginx acknowledges these pings
 4. The server thinks the connection is still alive and keeps it open
 
-## The Work-Around
+## The failed partial Workaround
 
 To be completely honest, first I thought about getting rid of nginx. But I can't just remove the reverse proxy, maybe some other proxy behaves like I want, forwarding PING frames?
 
 But nope, I tried envoy proxy and behaves the same way: it just ACK's the PING frames.
 
-To work around this limitation, I implemented a custom "home-made" ping mechanism using regular gRPC messages. This approach:
+As a reminder, my stream is unidirectional - the server notifies the client about some messages, but the client can't send any data (apart from the first request to establish the connection). So I had this great idea: The server should send frequent gRPC messages that act as a ping, and, if it fails to send many of those messages, then I should be able to detect it and terminate the connection. That sounds easy.
+
+But, after trying it... another dead end. Even with the client on airplane mode, my server was happily sending gRPC messages to the stream, and nothing happened - the client obviously didn't receive any message, but the server wouldn't complain. It is almost like someone was queueing those messages in a buffer and send them when the client is available...
+
+That was my theory and I was correct. It seems that nginx (as a good citizen) buffers the messages and forwards it when it can https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_buffering . I thought about disabling this buffering, since it is possible to do so, but I discarded that idea - The server has many gRPC endpoints apart from this one, and I don't wan't to lose the buffering benefits just for this usecase. There has to be another way...
+
+## The Succesful Workaround
+
+So, this is what finally worked: a mechanism that relies on the client sending pings, and the server responding to this pings, all using gRPC messages. 
+This approach:
 
 1. Uses standard gRPC messages instead of HTTP/2 ping frames
 2. Can be properly proxied by Nginx
@@ -314,5 +323,5 @@ Even with authentication in place, you need to protect against potential abuse:
 
 While not ideal, this workaround provides a reliable solution for maintaining healthy gRPC connections through Nginx proxies. It's a good example of how sometimes we need to think outside the box when working with complex infrastructure setups, especially when dealing with mobile clients that may have unreliable connections.
 
-For a complete implementation example, check out the [nginx-hates-grpc-keepalive](https://github.com/hectorgabucio/nginx-hates-grpc-keepalive) repository.
+For a complete implementation example, check out the [nginx-hates-grpc-keepalive](https://github.com/hectorgabucio/nginx-hates-grpc-keepalive) repository. Feel free to play with it - enable grpc pings, try it with the nginx or envoy proxy, etc. 
 
