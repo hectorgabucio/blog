@@ -30,30 +30,28 @@ Unlike TCP keepalive, gRPC uses HTTP/2 which provides a mandatory PING frame (sp
 
 The interval and retry mechanisms in TCP keepalive don't quite apply to HTTP/2 PING frames because the transport is reliable. Instead, they're replaced with a timeout value (equivalent to interval * retry) in gRPC's PING-based keepalive implementation.
 
+## Hands-on with gRPC Keepalive
 
-## Playing with gRPC keepalive
+Let's explore how gRPC keepalive works in practice using a simple example. First, we'll enable keepalive on the client side:
 
-Let's use our toy project to understand more about the keepalive future.
-First, let's enable the keepalive mechanism in the client side
-
-```diff
-    private val channel = ManagedChannelBuilder
-      .forAddress(SERVER_IP, SERVER_PORT)
-        .usePlaintext()
-+              // send ping frames every 10 seconds
-+            .keepAliveTime(10, TimeUnit.SECONDS)
-+              // server should respond to ping in 15 seconds max
-+            .keepAliveTimeout(15, TimeUnit.SECONDS)
-        .build()
+```kotlin
+private val channel = ManagedChannelBuilder
+    .forAddress(SERVER_IP, SERVER_PORT)
+    .usePlaintext()
+    // Send ping frames every 10 seconds
+    .keepAliveTime(10, TimeUnit.SECONDS)
+    // Server should respond to ping in 15 seconds max
+    .keepAliveTimeout(15, TimeUnit.SECONDS)
+    .build()
 ```
 
-Now, let's run our server with the env variable needed to debug HTTP2 traces
+To see the HTTP/2 frames in action, we can run our server with debug logging enabled:
 
 ```bash
 env GODEBUG=http2debug=2 go run main.go
 ```
 
-If we connect our client and start the stream, we will see something like this
+When we connect our client and start the stream, we'll see the following in the logs:
 
 ```bash
 2025/05/09 19:06:53 http2: Framer 0x1400018a540: read PING len=8 ping="\xa1\x97GVkb\xb4|"
@@ -69,18 +67,18 @@ If we connect our client and start the stream, we will see something like this
 2025/05/09 19:07:24 Stream ended
 ```
 
-As you can see, the client is indeed sending ping frames every 10 seconds (by the way, this is the minimum allowed, atleast for the Java client). Even if we didn't enable the keepalive in our server, we see that it is responding with a PING frame with flag ACK. But after few pings responded, it sends a GOAWAY frame with the code ENHANCE_YOUR_CALM. This is because the server is not configured to accept ping frames, so it terminates the connection.
+As we can see, the client is sending ping frames every 10 seconds (note: this is the minimum allowed for the Java client). Even though we haven't enabled keepalive on our server, it's responding with PING frames with the ACK flag. However, after a few pings, it sends a GOAWAY frame with the code `ENHANCE_YOUR_CALM`. This happens because the server isn't configured to accept ping frames, so it terminates the connection.
 
-Let's now enable the keepalive also in the server. This should do the job
+Let's enable keepalive on the server side as well:
 
 ```go
 s := grpc.NewServer(grpc.KeepaliveParams(keepalive.ServerParameters{
-   Time:    10 * time.Second,
-   Timeout: 15 * time.Second,
+    Time:    10 * time.Second,
+    Timeout: 15 * time.Second,
 }))
 ```
 
-Now the logs look like this:
+Now the logs show bidirectional ping communication:
 
 ```bash
 2025/05/09 19:24:30 http2: Framer 0x14000200540: wrote PING len=8 ping="\x00\x00\x00\x00\x00\x00\x00\x00"
@@ -89,21 +87,13 @@ Now the logs look like this:
 2025/05/09 19:24:40 http2: Framer 0x14000200540: read PING len=8 ping="\xa6\x9c#UD[\x83\xd0"
 2025/05/09 19:24:40 http2: Framer 0x14000200540: wrote PING flags=ACK len=8 ping="\xa6\x9c#UD[\x83\xd0"
 2025/05/09 19:24:40 http2: Framer 0x14000200540: read PING flags=ACK len=8 ping="\x00\x00\x00\x00\x00\x00\x00\x00"
-2025/05/09 19:24:50 http2: Framer 0x14000200540: wrote PING len=8 ping="\x00\x00\x00\x00\x00\x00\x00\x00"
-2025/05/09 19:24:50 http2: Framer 0x14000200540: read PING len=8 ping="\xe5\x90\xda\\\x9eё\xbf"
-2025/05/09 19:24:50 http2: Framer 0x14000200540: wrote PING flags=ACK len=8 ping="\xe5\x90\xda\\\x9eё\xbf"
-2025/05/09 19:24:50 http2: Framer 0x14000200540: read PING flags=ACK len=8 ping="\x00\x00\x00\x00\x00\x00\x00\x00"
-2025/05/09 19:25:00 http2: Framer 0x14000200540: wrote PING len=8 ping="\x00\x00\x00\x00\x00\x00\x00\x00"
-2025/05/09 19:25:00 http2: Framer 0x14000200540: read PING flags=ACK len=8 ping="\x00\x00\x00\x00\x00\x00\x00\x00"
-2025/05/09 19:25:10 http2: Framer 0x14000200540: wrote PING len=8 ping="\x00\x00\x00\x00\x00\x00\x00\x00"
-2025/05/09 19:25:10 http2: Framer 0x14000200540: read PING len=8 ping="X\xde\xedl\xa8\b\\\x90"
-2025/05/09 19:25:10 http2: Framer 0x14000200540: wrote PING flags=ACK len=8 ping="X\xde\xedl\xa8\b\\\x90"
-2025/05/09 19:25:10 http2: Framer 0x14000200540: read PING flags=ACK len=8 ping="\x00\x00\x00\x00\x00\x00\x00\x00"
 ```
 
-As you can see, there is both "wrote PING", "wrote PING ACK", "read PING", and "read PING ACK". It means both sides are sending ping's to each other. That is cool!
+We can see both "wrote PING", "wrote PING ACK", "read PING", and "read PING ACK" messages, indicating that both sides are actively sending pings to each other. This is exactly what we want!
 
-What happens if the android app loses connection? Let's try by putting airplane mode:
+### Testing Connection Loss
+
+Let's see what happens when the Android app loses connection. We can simulate this by enabling airplane mode:
 
 ```bash
 2025/05/09 19:28:07 Received request: Hello Server!
@@ -115,14 +105,19 @@ What happens if the android app loses connection? Let's try by putting airplane 
 2025/05/09 19:28:17 http2: Framer 0x14000200540: wrote PING len=8 ping="\x00\x00\x00\x00\x00\x00\x00\x00"
 2025/05/09 19:28:32 Context cancelled
 2025/05/09 19:28:32 Stream ended
-
 ```
 
-The server sends a PING frame at 19:28:17 to check if the connection is alive. Then, we see a gap of 15 seconds (our keepalive timeout config!!) where nothing happens (no ack, not another ping sent from the server). And finally, the server decides to terminate the connection after no response of the client.
+The server sends a PING frame at 19:28:17 to check the connection. After 15 seconds (our configured keepalive timeout) with no response, the server terminates the connection. This is exactly the behavior we want!
 
-That is really cool, right? That is what I thought too, so, after trying it locally, I decided to deploy it to a test environment. In the test (and production) environment, we use ingress nginx as our reverse proxy for the backend services, because it provides us a way of load-balancing, security, rate limiting, and many other nice features. Anyway, I tried this keepalive in the environment and, surprisingly, didn't work. I couldn't understand why, but I could see that, even if I put airplane mode on the phone, the server was sending PING frames and someone was responding with an ACK... 
+### The Nginx Surprise
 
-TODO meme wtf
+After successfully testing locally, I deployed the solution to our test environment. We use Ingress Nginx as our reverse proxy for backend services, which provides load balancing, security, rate limiting, and other features. However, when testing the keepalive mechanism in this environment, something unexpected happened.
+
+Even with airplane mode enabled on the phone, **the server was still receiving ACK responses to its PING frames. This was confusing because we knew the client was disconnected, but the server thought the connection was still alive.**
+
+<p align="center">
+<img alt="WTF meme" src="https://media2.giphy.com/media/v1.Y2lkPTc5MGI3NjExZHY4OHlsZTR4Z3BpeWltaThtenN1NHYzb2kxb2hocDZ3aG5vMm43cSZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/b8RQzkElbBsXqEPF2X/giphy.gif"
+</p>
 
 ## The Problem
 
