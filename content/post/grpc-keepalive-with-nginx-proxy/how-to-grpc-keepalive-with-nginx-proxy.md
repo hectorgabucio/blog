@@ -285,20 +285,30 @@ The custom ping mechanism works as follows:
 
 This bidirectional ping mechanism ensures both sides can detect connection issues and take appropriate action.
 
-It is really simple to mantain and it works great, nginx will forward those messages since are just gRPC messages. 
+It is really simple to maintain and it works great - Nginx will forward these messages since they're just gRPC messages. However, there are two important considerations to keep in mind:
 
-## Best Practices
+### Ping Frequency
 
-When implementing custom keepalive mechanisms for gRPC with Nginx:
+Finding the right balance for ping frequency is crucial:
+- Too frequent pings: Unnecessary network overhead and server load
+- Too infrequent pings: Delayed detection of connection issues
+- Recommended: Start with 10-second intervals and adjust based on your needs
 
-1. Always test the connection health monitoring
-2. Consider the impact on your message throughput
-3. Monitor the additional overhead of custom ping messages
-4. Document the workaround for other team members
-5. **Security Considerations:**
-   - Protect the stream with authentication tokens to prevent unauthorized access
-   - Implement rate limiting on the backend to protect against potential DoS attacks from misbehaving clients
-   - Consider the impact of ping frequency on your server resources
+### Security Considerations
+
+Even with authentication in place, you need to protect against potential abuse:
+
+1. **Rate Limiting**
+   - Implement a rate limiter per connection
+   - Example: Limit to 10 pings per 10-second window
+   - Terminate connections that exceed the limit
+   - This prevents DoS attacks from authenticated clients
+
+2. **Why It's Necessary**
+   - Authentication only protects against unauthorized access
+   - Once authenticated, clients can still send excessive pings
+   - Without rate limiting, a single client could overwhelm your server
+   - This is especially important for public-facing services
 
 ## Conclusion
 
