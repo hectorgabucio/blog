@@ -1,7 +1,7 @@
 ---
-title: "Implementing gRPC Keepalive with Nginx Proxy"
+title: "Implementing gRPC Keepalive with a Go server behind a nginx proxy"
 date: 2025-05-09
-description: "A deep dive into implementing a custom keepalive mechanism for gRPC server streams when working with Nginx proxy"
+description: "A practical guide to implementing reliable connection health checks for gRPC server streams when working with Nginx proxy, including a custom keepalive solution and real-world considerations"
 tags: 
     - grpc
     - go
@@ -326,7 +326,45 @@ Even with authentication in place, you need to protect against potential abuse:
 
 ## Conclusion
 
+This journey through implementing gRPC keepalive with Nginx has taught me several important lessons:
+
+1. **HTTP/2 Pings Don't Work with Proxies**
+   - Nginx and Envoy both ACK HTTP/2 ping frames instead of forwarding them
+   - This breaks the standard gRPC keepalive mechanism
+   - The issue is well-documented but marked as "WONT FIX" by the Nginx team
+
+2. **Server-Side Pings Aren't Reliable**
+   - Nginx's buffering behavior makes server-side ping detection unreliable
+   - Messages get queued even when the client is disconnected
+   - Disabling buffering isn't a viable solution for most setups
+
+3. **The Solution: Client-Initiated Pings**
+   - Using regular gRPC messages for keepalive works reliably
+   - The client sends pings, and the server responds
+   - Nginx properly forwards these messages
+   - We get the same functionality as built-in keepalive
+
+4. **Important Considerations**
+   - Need to implement proper rate limiting
+   - Must balance ping frequency
+   - Should monitor connection health
+   - Requires bidirectional streams
+
 While not ideal, this workaround provides a reliable solution for maintaining healthy gRPC connections through Nginx proxies. It's a good example of how sometimes we need to think outside the box when working with complex infrastructure setups, especially when dealing with mobile clients that may have unreliable connections.
 
-For a complete implementation example, check out the [nginx-hates-grpc-keepalive](https://github.com/hectorgabucio/nginx-hates-grpc-keepalive) repository. Feel free to play with it - enable gRPC pings, try it with the Nginx or Envoy proxy, etc.
+For a complete implementation example, check out the [nginx-hates-grpc-keepalive](https://github.com/hectorgabucio/nginx-hates-grpc-keepalive) repository. Feel free to play with it - enable gRPC pings, try it with the Nginx or Envoy proxy, etc. 🚀
 
+## Thoughts
+
+While gRPC's built-in keepalive mechanism works perfectly for direct client-server communication, this scenario is rare in production environments. In reality, 99% of deployments use load balancers, proxies, and other infrastructure components.
+
+The proxy teams' decision to respond to HTTP/2 PING frames with ACKs makes perfect sense from their perspective. However, this creates a challenge for gRPC's keepalive mechanism, which relies on these standard HTTP/2 frames.
+
+I believe gRPC should reconsider its keepalive implementation. Instead of relying on HTTP/2 standard frames, it could use gRPC standard messages for health checks. This would make it much easier to implement reliable connection monitoring in real-world scenarios, especially for:
+
+- Long-lasting stream connections
+- Mobile client applications
+- Real-time data updates (similar to WebSocket functionality)
+- Production environments with complex infrastructure
+
+In my case, this would have simplified the implementation of real-time notifications for mobile clients about relevant data changes. The current workaround works, but a native solution would be more elegant and maintainable.
