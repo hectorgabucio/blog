@@ -119,6 +119,90 @@ Even with airplane mode enabled on the phone, **the server was still receiving A
 <img alt="WTF meme" src="https://media2.giphy.com/media/v1.Y2lkPTc5MGI3NjExZHY4OHlsZTR4Z3BpeWltaThtenN1NHYzb2kxb2hocDZ3aG5vMm43cSZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/b8RQzkElbBsXqEPF2X/giphy.gif"
 </p>
 
+
+### Reproducing the Issue
+
+To better understand the problem, I used my toy project to reproduce the issue. I added an nginx proxy between the Android client and the server by running a Docker container with nginx, configured to forward traffic to my Go service.
+
+Let's start by running our Docker Compose setup:
+
+```bash
+docker-compose up --build
+```
+
+#### First Weird Behavior: Missing Client Pings
+
+We immediately notice something strange - the server isn't receiving the client's ping frames:
+
+```bash
+grpc-server-1  | 2025/05/09 17:51:17 Received request: Hello Server!
+grpc-server-1  | 2025/05/09 17:51:27 http2: Framer 0x40000e4540: wrote PING len=8 ping="\x00\x00\x00\x00\x00\x00\x00\x00"
+grpc-server-1  | 2025/05/09 17:51:27 http2: Framer 0x40000e4540: read PING flags=ACK len=8 ping="\x00\x00\x00\x00\x00\x00\x00\x00"
+grpc-server-1  | 2025/05/09 17:51:37 http2: Framer 0x40000e4540: wrote PING len=8 ping="\x00\x00\x00\x00\x00\x00\x00\x00"
+grpc-server-1  | 2025/05/09 17:51:37 http2: Framer 0x40000e4540: read PING flags=ACK len=8 ping="\x00\x00\x00\x00\x00\x00\x00\x00"
+```
+
+Notice how we only see PINGs that the server is writing, and someone is sending ACKs. But who?
+
+#### The Mystery Deepens
+
+Let's try enabling airplane mode on the phone. Surely we shouldn't see any PING ACKs now, right?
+
+```bash
+grpc-server-1  | 2025/05/09 17:53:50 Received request: Hello Server!
+
+(I enabled airplane mode here)
+
+grpc-server-1  | 2025/05/09 17:54:00 http2: Framer 0x40000e4540: wrote PING len=8 ping="\x00\x00\x00\x00\x00\x00\x00\x00"
+grpc-server-1  | 2025/05/09 17:54:00 http2: Framer 0x40000e4540: read PING flags=ACK len=8 ping="\x00\x00\x00\x00\x00\x00\x00\x00"
+grpc-server-1  | 2025/05/09 17:54:10 http2: Framer 0x40000e4540: wrote PING len=8 ping="\x00\x00\x00\x00\x00\x00\x00\x00"
+grpc-server-1  | 2025/05/09 17:54:10 http2: Framer 0x40000e4540: read PING flags=ACK len=8 ping="\x00\x00\x00\x00\x00\x00\x00\x00"
+```
+
+<p align="center">
+<img alt="Mystery meme" src="https://media.giphy.com/media/3o7btNa0RUYa5E7iiQ/giphy.gif" />
+</p>
+
+Who is responding to the pings when the client has airplane mode enabled?
+
+### The Investigation
+
+After some research, I found a [GitHub issue](https://github.com/kubernetes/ingress-nginx/issues/4402) where someone reported the same problem:
+
+> "Currently my grpc server is doing keep alive ping each 10 seconds and ngnix proxy is doing ack of the ping but ngnix itself is not pinging client."
+
+However, there wasn't a clear solution in that issue. Then I discovered an even older issue in the nginx issue tracker, [closed as "WONT FIX" from 5 years ago](https://trac.nginx.org/nginx/ticket/1887).
+
+The issue description was particularly relevant:
+
+> "gRPC has multiple options for keepalive, which are especially relevant for streaming messages:
+> 
+> https://github.com/grpc/grpc/blob/master/doc/keepalive.md
+> 
+> With these you are able to track disappearing clients and narrow connection latency. gRPC uses HTTP/2 ping messages for keepalives. When proxying through nginx, nginx does not passthrough ping messages to the client.
+> 
+> When using nginx with gRPC you currently have to implement a form of keepalive yourself. Send and receive timeouts from nginx are not helpful, as we use gRPC with long-lived streaming connections.
+> 
+> Possible solutions:
+> 
+> 1. Add an option to passthrough HTTP/2 ping messages to the gRPC backend: `grpc_ping_passthrough yes/no`.
+> 2. Add ability to send keepalive pings from nginx. In this case nginx would need additional options and nginx would have to terminate the connection if there is no response to the ping messages, similar to what gRPC does."
+
+### The NGINX Team's Response
+
+The NGINX team's response was clear. They explained that using HTTP/2 pings to check client connectivity doesn't work well with NGINX as a proxy because:
+
+1. A single connection to the backend may serve multiple clients (especially with HTTP/2 multiplexing)
+2. There's no persistent connection between the client and the backend unless there's an active request
+3. Multiple simultaneous client requests mean multiple client-server connections
+
+Their conclusion was straightforward: HTTP/2 pings only help verify direct (peer-to-peer) connections, not end-to-end connectivity through a proxy.
+
+### The TCP Keepalive Alternative
+
+As a possible solution, they mentioned using TCP keepalive. However, I rejected this idea because TCP keepalive is notoriously difficult to maintain, with many edge cases to handle and debug. For a great example of these challenges, you can read this [insightful post from Cloudflare](https://blog.cloudflare.com/when-tcp-sockets-refuse-to-die/).
+
+
 ## The Problem
 
 The standard gRPC keepalive mechanism relies on HTTP/2 ping frames to maintain connection health. However, when using Nginx as a proxy, these ping frames don't work as expected. Nginx acknowledges (ACKs) these ping frames instead of forwarding them, effectively breaking the keepalive mechanism. This creates a situation where:
@@ -177,3 +261,4 @@ When implementing custom keepalive mechanisms for gRPC with Nginx:
 While not ideal, this workaround provides a reliable solution for maintaining healthy gRPC connections through Nginx proxies. It's a good example of how sometimes we need to think outside the box when working with complex infrastructure setups, especially when dealing with mobile clients that may have unreliable connections.
 
 For a complete implementation example, check out the [nginx-hates-grpc-keepalive](https://github.com/hectorgabucio/nginx-hates-grpc-keepalive) repository.
+
