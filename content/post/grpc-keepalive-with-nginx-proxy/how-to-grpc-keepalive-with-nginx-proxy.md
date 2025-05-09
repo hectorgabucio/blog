@@ -218,27 +218,71 @@ Since the gRPC keepalive can be enabled on the server side as well, it creates a
 3. Nginx acknowledges these pings
 4. The server thinks the connection is still alive and keeps it open
 
-## The Solution
+## The Work-Around
+
+To be completely honest, first I thought about getting rid of nginx. But I can't just remove the reverse proxy, maybe some other proxy behaves like I want, forwarding PING frames?
+
+But nope, I tried envoy proxy and behaves the same way: it just ACK's the PING frames.
 
 To work around this limitation, I implemented a custom "home-made" ping mechanism using regular gRPC messages. This approach:
 
 1. Uses standard gRPC messages instead of HTTP/2 ping frames
 2. Can be properly proxied by Nginx
-3. Maintains the same functionality as the built-in keepalive mechanism
+3. Maintains (almost) the same functionality as the built-in keepalive mechanism
 
 ## Implementation Details
 
 I've created a demonstration repository that shows how to implement this custom keepalive mechanism: [nginx-hates-grpc-keepalive](https://github.com/hectorgabucio/nginx-hates-grpc-keepalive).
 
+This work-around introduced a breaking change in my original stream: I can't just rely on a unidirectional server-stream. I actually need a bidirectional stream, where both client and server can send and receive ping requests.
+
+This is the proto definition of the contract:
+
+```proto
+service StreamService {
+    // Bidirectional streaming RPC
+    rpc Stream (stream StreamMessage) returns (stream StreamMessage) {}
+}
+
+message StreamMessage {
+    oneof content {
+        StreamRequest request = 1;
+        StreamResponse response = 2;
+        Ping ping = 3;
+        Pong pong = 4;
+    }
+}
+
+message StreamRequest {
+    string query = 1;
+}
+
+message StreamResponse {
+    string message = 1;
+    int32 index = 2;
+}
+
+message Ping {
+    int64 timestamp = 1;
+}
+
+message Pong {
+    int64 original_timestamp = 1;
+    int64 server_timestamp = 2;
+}
+
+```
+Please note the Ping and Pong messages: those are part of our home-made keepalive system.
+
 The custom ping mechanism works as follows:
 
 1. **Client-side behavior:**
-   - Sends frequent ping messages to the server
-   - Expects a ping reply from the server
+   - Sends frequent ping messages to the server (StreamMessage with content Ping)
+   - Expects a ping reply from the server (StreamMessage with content Pong)
    - Terminates the connection if no reply is received within a reasonable timeframe
 
 2. **Server-side behavior:**
-   - Monitors incoming ping messages from the client
+   - Monitors incoming ping messages from the client (StreamMessage with content Ping) and replies (StreamMessage with content Pong)
    - Terminates the connection if no pings are received within the expected interval
 
 This bidirectional ping mechanism ensures both sides can detect connection issues and take appropriate action.
