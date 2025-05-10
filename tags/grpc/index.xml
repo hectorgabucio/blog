@@ -1,0 +1,441 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>Grpc on Héctor's Blog</title><link>https://blog.hectorgabucio.com/tags/grpc/</link><description>Recent content in Grpc on Héctor's Blog</description><generator>Hugo -- gohugo.io</generator><language>en-us</language><lastBuildDate>Fri, 09 May 2025 00:00:00 +0000</lastBuildDate><atom:link href="https://blog.hectorgabucio.com/tags/grpc/index.xml" rel="self" type="application/rss+xml"/><item><title>Implementing gRPC Keepalive with a Go server behind a nginx proxy</title><link>https://blog.hectorgabucio.com/p/implementing-grpc-keepalive-with-a-go-server-behind-a-nginx-proxy/</link><pubDate>Fri, 09 May 2025 00:00:00 +0000</pubDate><guid>https://blog.hectorgabucio.com/p/implementing-grpc-keepalive-with-a-go-server-behind-a-nginx-proxy/</guid><description>&lt;h2 id="intro">Intro
+&lt;/h2>&lt;p>Grab a coffee and join me on this journey through the challenges of implementing gRPC keepalive in a Go service behind an Nginx proxy. I&amp;rsquo;ll share my experience, the problems I encountered, and how I found a solution that actually works in production.&lt;/p>
+&lt;h2 id="the-challenge">The Challenge
+&lt;/h2>&lt;p>In a recent project, I faced an interesting challenge: implementing a gRPC server stream that needed to maintain a healthy connection. This was particularly important because our client was a mobile application that could experience poor signal quality, intermittent data loss, and other connectivity issues. The natural approach would be to use gRPC&amp;rsquo;s built-in keepalive mechanism, but there was a catch - we were using Nginx as a proxy.&lt;/p>
+&lt;h2 id="understanding-grpc-keepalive">Understanding gRPC Keepalive
+&lt;/h2>&lt;p>Before diving into the problem, let&amp;rsquo;s understand how gRPC keepalive works. The official documentation can be found in the &lt;a class="link" href="https://grpc.io/docs/guides/keepalive/" target="_blank" rel="noopener"
+>gRPC keepalive guide&lt;/a>.&lt;/p>
+&lt;p>TCP keepalive is a well-known method of maintaining connections and detecting broken connections. When TCP keepalive is enabled, either side of the connection can send redundant packets. Once ACKed by the other side, the connection will be considered as good. If no ACK is received after repeated attempts, the connection is deemed broken.&lt;/p>
+&lt;p>Unlike TCP keepalive, gRPC uses HTTP/2 which provides a mandatory PING frame (specified in &lt;a class="link" href="https://httpwg.org/specs/rfc7540.html#PING" target="_blank" rel="noopener"
+>RFC 7540&lt;/a>) that can be used to:&lt;/p>
+&lt;ul>
+&lt;li>Estimate round-trip time&lt;/li>
+&lt;li>Measure bandwidth-delay product&lt;/li>
+&lt;li>Test the connection health&lt;/li>
+&lt;/ul>
+&lt;p>The interval and retry mechanisms in TCP keepalive don&amp;rsquo;t quite apply to HTTP/2 PING frames because the transport is reliable. Instead, they&amp;rsquo;re replaced with a timeout value (equivalent to interval * retry) in gRPC&amp;rsquo;s PING-based keepalive implementation.&lt;/p>
+&lt;h2 id="hands-on-with-grpc-keepalive">Hands-on with gRPC Keepalive
+&lt;/h2>&lt;p>Let&amp;rsquo;s explore how gRPC keepalive works in practice using a simple example. First, we&amp;rsquo;ll enable keepalive on the client side:&lt;/p>
+&lt;div class="highlight">&lt;div class="chroma">
+&lt;table class="lntable">&lt;tr>&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code>&lt;span class="lnt">1
+&lt;/span>&lt;span class="lnt">2
+&lt;/span>&lt;span class="lnt">3
+&lt;/span>&lt;span class="lnt">4
+&lt;/span>&lt;span class="lnt">5
+&lt;/span>&lt;span class="lnt">6
+&lt;/span>&lt;span class="lnt">7
+&lt;/span>&lt;span class="lnt">8
+&lt;/span>&lt;/code>&lt;/pre>&lt;/td>
+&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code class="language-kotlin" data-lang="kotlin">&lt;span class="line">&lt;span class="cl">&lt;span class="k">private&lt;/span> &lt;span class="k">val&lt;/span> &lt;span class="py">channel&lt;/span> &lt;span class="p">=&lt;/span> &lt;span class="n">ManagedChannelBuilder&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="p">.&lt;/span>&lt;span class="n">forAddress&lt;/span>&lt;span class="p">(&lt;/span>&lt;span class="n">SERVER_IP&lt;/span>&lt;span class="p">,&lt;/span> &lt;span class="n">SERVER_PORT&lt;/span>&lt;span class="p">)&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="p">.&lt;/span>&lt;span class="n">usePlaintext&lt;/span>&lt;span class="p">()&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="c1">// Send ping frames every 10 seconds
+&lt;/span>&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">&lt;span class="c1">&lt;/span> &lt;span class="p">.&lt;/span>&lt;span class="n">keepAliveTime&lt;/span>&lt;span class="p">(&lt;/span>&lt;span class="m">10&lt;/span>&lt;span class="p">,&lt;/span> &lt;span class="nc">TimeUnit&lt;/span>&lt;span class="p">.&lt;/span>&lt;span class="n">SECONDS&lt;/span>&lt;span class="p">)&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="c1">// Server should respond to ping in 15 seconds max
+&lt;/span>&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">&lt;span class="c1">&lt;/span> &lt;span class="p">.&lt;/span>&lt;span class="n">keepAliveTimeout&lt;/span>&lt;span class="p">(&lt;/span>&lt;span class="m">15&lt;/span>&lt;span class="p">,&lt;/span> &lt;span class="nc">TimeUnit&lt;/span>&lt;span class="p">.&lt;/span>&lt;span class="n">SECONDS&lt;/span>&lt;span class="p">)&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="p">.&lt;/span>&lt;span class="n">build&lt;/span>&lt;span class="p">()&lt;/span>
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/td>&lt;/tr>&lt;/table>
+&lt;/div>
+&lt;/div>&lt;p>To see the HTTP/2 frames in action, we can run our server with debug logging enabled:&lt;/p>
+&lt;div class="highlight">&lt;div class="chroma">
+&lt;table class="lntable">&lt;tr>&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code>&lt;span class="lnt">1
+&lt;/span>&lt;/code>&lt;/pre>&lt;/td>
+&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code class="language-bash" data-lang="bash">&lt;span class="line">&lt;span class="cl">env &lt;span class="nv">GODEBUG&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="nv">http2debug&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="m">2&lt;/span> go run main.go
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/td>&lt;/tr>&lt;/table>
+&lt;/div>
+&lt;/div>&lt;p>When we connect our client and start the stream, we&amp;rsquo;ll see the following in the logs:&lt;/p>
+&lt;div class="highlight">&lt;div class="chroma">
+&lt;table class="lntable">&lt;tr>&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code>&lt;span class="lnt"> 1
+&lt;/span>&lt;span class="lnt"> 2
+&lt;/span>&lt;span class="lnt"> 3
+&lt;/span>&lt;span class="lnt"> 4
+&lt;/span>&lt;span class="lnt"> 5
+&lt;/span>&lt;span class="lnt"> 6
+&lt;/span>&lt;span class="lnt"> 7
+&lt;/span>&lt;span class="lnt"> 8
+&lt;/span>&lt;span class="lnt"> 9
+&lt;/span>&lt;span class="lnt">10
+&lt;/span>&lt;span class="lnt">11
+&lt;/span>&lt;/code>&lt;/pre>&lt;/td>
+&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code class="language-bash" data-lang="bash">&lt;span class="line">&lt;span class="cl">2025/05/09 19:06:53 http2: Framer 0x1400018a540: &lt;span class="nb">read&lt;/span> PING &lt;span class="nv">len&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="m">8&lt;/span> &lt;span class="nv">ping&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="s2">&amp;#34;\xa1\x97GVkb\xb4|&amp;#34;&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">2025/05/09 19:06:53 http2: Framer 0x1400018a540: wrote PING &lt;span class="nv">flags&lt;/span>&lt;span class="o">=&lt;/span>ACK &lt;span class="nv">len&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="m">8&lt;/span> &lt;span class="nv">ping&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="s2">&amp;#34;\xa1\x97GVkb\xb4|&amp;#34;&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">2025/05/09 19:07:03 http2: Framer 0x1400018a540: &lt;span class="nb">read&lt;/span> PING &lt;span class="nv">len&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="m">8&lt;/span> &lt;span class="nv">ping&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="s2">&amp;#34;\xd9L\xad&amp;gt;&amp;amp;\b\xb8\x86&amp;#34;&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">2025/05/09 19:07:03 http2: Framer 0x1400018a540: wrote PING &lt;span class="nv">flags&lt;/span>&lt;span class="o">=&lt;/span>ACK &lt;span class="nv">len&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="m">8&lt;/span> &lt;span class="nv">ping&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="s2">&amp;#34;\xd9L\xad&amp;gt;&amp;amp;\b\xb8\x86&amp;#34;&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">2025/05/09 19:07:13 http2: Framer 0x1400018a540: &lt;span class="nb">read&lt;/span> PING &lt;span class="nv">len&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="m">8&lt;/span> &lt;span class="nv">ping&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="s2">&amp;#34;\xd84|3G6|\x1a&amp;#34;&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">2025/05/09 19:07:13 http2: Framer 0x1400018a540: wrote PING &lt;span class="nv">flags&lt;/span>&lt;span class="o">=&lt;/span>ACK &lt;span class="nv">len&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="m">8&lt;/span> &lt;span class="nv">ping&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="s2">&amp;#34;\xd84|3G6|\x1a&amp;#34;&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">2025/05/09 19:07:23 http2: Framer 0x1400018a540: &lt;span class="nb">read&lt;/span> PING &lt;span class="nv">len&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="m">8&lt;/span> &lt;span class="nv">ping&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="s2">&amp;#34;\xd4\xdeڬ\x858\x89\x82&amp;#34;&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">2025/05/09 19:07:23 http2: Framer 0x1400018a540: wrote PING &lt;span class="nv">flags&lt;/span>&lt;span class="o">=&lt;/span>ACK &lt;span class="nv">len&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="m">8&lt;/span> &lt;span class="nv">ping&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="s2">&amp;#34;\xd4\xdeڬ\x858\x89\x82&amp;#34;&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">2025/05/09 19:07:23 http2: Framer 0x1400018a540: wrote GOAWAY &lt;span class="nv">len&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="m">22&lt;/span> &lt;span class="nv">LastStreamID&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="m">3&lt;/span> &lt;span class="nv">ErrCode&lt;/span>&lt;span class="o">=&lt;/span>ENHANCE_YOUR_CALM &lt;span class="nv">Debug&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="s2">&amp;#34;too_many_pings&amp;#34;&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">2025/05/09 19:07:24 Context cancelled
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">2025/05/09 19:07:24 Stream ended
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/td>&lt;/tr>&lt;/table>
+&lt;/div>
+&lt;/div>&lt;p>As we can see, the client is sending ping frames every 10 seconds (note: this is the minimum allowed for the Java client). Even though we haven&amp;rsquo;t enabled keepalive on our server, it&amp;rsquo;s responding with PING frames with the ACK flag. However, after a few pings, it sends a GOAWAY frame with the code &lt;code>ENHANCE_YOUR_CALM&lt;/code>. This happens because the server isn&amp;rsquo;t configured to accept ping frames, so it terminates the connection.&lt;/p>
+&lt;p>Let&amp;rsquo;s enable keepalive on the server side as well:&lt;/p>
+&lt;div class="highlight">&lt;div class="chroma">
+&lt;table class="lntable">&lt;tr>&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code>&lt;span class="lnt">1
+&lt;/span>&lt;span class="lnt">2
+&lt;/span>&lt;span class="lnt">3
+&lt;/span>&lt;span class="lnt">4
+&lt;/span>&lt;/code>&lt;/pre>&lt;/td>
+&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code class="language-go" data-lang="go">&lt;span class="line">&lt;span class="cl">&lt;span class="nx">s&lt;/span> &lt;span class="o">:=&lt;/span> &lt;span class="nx">grpc&lt;/span>&lt;span class="p">.&lt;/span>&lt;span class="nf">NewServer&lt;/span>&lt;span class="p">(&lt;/span>&lt;span class="nx">grpc&lt;/span>&lt;span class="p">.&lt;/span>&lt;span class="nf">KeepaliveParams&lt;/span>&lt;span class="p">(&lt;/span>&lt;span class="nx">keepalive&lt;/span>&lt;span class="p">.&lt;/span>&lt;span class="nx">ServerParameters&lt;/span>&lt;span class="p">{&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="nx">Time&lt;/span>&lt;span class="p">:&lt;/span> &lt;span class="mi">10&lt;/span> &lt;span class="o">*&lt;/span> &lt;span class="nx">time&lt;/span>&lt;span class="p">.&lt;/span>&lt;span class="nx">Second&lt;/span>&lt;span class="p">,&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="nx">Timeout&lt;/span>&lt;span class="p">:&lt;/span> &lt;span class="mi">15&lt;/span> &lt;span class="o">*&lt;/span> &lt;span class="nx">time&lt;/span>&lt;span class="p">.&lt;/span>&lt;span class="nx">Second&lt;/span>&lt;span class="p">,&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">&lt;span class="p">}))&lt;/span>
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/td>&lt;/tr>&lt;/table>
+&lt;/div>
+&lt;/div>&lt;p>Now the logs show bidirectional ping communication:&lt;/p>
+&lt;div class="highlight">&lt;div class="chroma">
+&lt;table class="lntable">&lt;tr>&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code>&lt;span class="lnt">1
+&lt;/span>&lt;span class="lnt">2
+&lt;/span>&lt;span class="lnt">3
+&lt;/span>&lt;span class="lnt">4
+&lt;/span>&lt;span class="lnt">5
+&lt;/span>&lt;span class="lnt">6
+&lt;/span>&lt;/code>&lt;/pre>&lt;/td>
+&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code class="language-bash" data-lang="bash">&lt;span class="line">&lt;span class="cl">2025/05/09 19:24:30 http2: Framer 0x14000200540: wrote PING &lt;span class="nv">len&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="m">8&lt;/span> &lt;span class="nv">ping&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="s2">&amp;#34;\x00\x00\x00\x00\x00\x00\x00\x00&amp;#34;&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">2025/05/09 19:24:30 http2: Framer 0x14000200540: &lt;span class="nb">read&lt;/span> PING &lt;span class="nv">flags&lt;/span>&lt;span class="o">=&lt;/span>ACK &lt;span class="nv">len&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="m">8&lt;/span> &lt;span class="nv">ping&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="s2">&amp;#34;\x00\x00\x00\x00\x00\x00\x00\x00&amp;#34;&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">2025/05/09 19:24:40 http2: Framer 0x14000200540: wrote PING &lt;span class="nv">len&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="m">8&lt;/span> &lt;span class="nv">ping&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="s2">&amp;#34;\x00\x00\x00\x00\x00\x00\x00\x00&amp;#34;&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">2025/05/09 19:24:40 http2: Framer 0x14000200540: &lt;span class="nb">read&lt;/span> PING &lt;span class="nv">len&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="m">8&lt;/span> &lt;span class="nv">ping&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="s2">&amp;#34;\xa6\x9c#UD[\x83\xd0&amp;#34;&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">2025/05/09 19:24:40 http2: Framer 0x14000200540: wrote PING &lt;span class="nv">flags&lt;/span>&lt;span class="o">=&lt;/span>ACK &lt;span class="nv">len&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="m">8&lt;/span> &lt;span class="nv">ping&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="s2">&amp;#34;\xa6\x9c#UD[\x83\xd0&amp;#34;&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">2025/05/09 19:24:40 http2: Framer 0x14000200540: &lt;span class="nb">read&lt;/span> PING &lt;span class="nv">flags&lt;/span>&lt;span class="o">=&lt;/span>ACK &lt;span class="nv">len&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="m">8&lt;/span> &lt;span class="nv">ping&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="s2">&amp;#34;\x00\x00\x00\x00\x00\x00\x00\x00&amp;#34;&lt;/span>
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/td>&lt;/tr>&lt;/table>
+&lt;/div>
+&lt;/div>&lt;p>We can see both &amp;ldquo;wrote PING&amp;rdquo;, &amp;ldquo;wrote PING ACK&amp;rdquo;, &amp;ldquo;read PING&amp;rdquo;, and &amp;ldquo;read PING ACK&amp;rdquo; messages, indicating that both sides are actively sending pings to each other. This is exactly what we want!&lt;/p>
+&lt;h3 id="testing-connection-loss">Testing Connection Loss
+&lt;/h3>&lt;p>Let&amp;rsquo;s see what happens when the Android app loses connection. We can simulate this by enabling airplane mode:&lt;/p>
+&lt;div class="highlight">&lt;div class="chroma">
+&lt;table class="lntable">&lt;tr>&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code>&lt;span class="lnt">1
+&lt;/span>&lt;span class="lnt">2
+&lt;/span>&lt;span class="lnt">3
+&lt;/span>&lt;span class="lnt">4
+&lt;/span>&lt;span class="lnt">5
+&lt;/span>&lt;span class="lnt">6
+&lt;/span>&lt;span class="lnt">7
+&lt;/span>&lt;span class="lnt">8
+&lt;/span>&lt;span class="lnt">9
+&lt;/span>&lt;/code>&lt;/pre>&lt;/td>
+&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code class="language-bash" data-lang="bash">&lt;span class="line">&lt;span class="cl">2025/05/09 19:28:07 Received request: Hello Server!
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">2025/05/09 19:28:07 http2: Framer 0x14000200540: wrote PING &lt;span class="nv">len&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="m">8&lt;/span> &lt;span class="nv">ping&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="s2">&amp;#34;\x02\x04\x10\x10\t\x0e\a\a&amp;#34;&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">2025/05/09 19:28:07 http2: Framer 0x14000200540: &lt;span class="nb">read&lt;/span> PING &lt;span class="nv">flags&lt;/span>&lt;span class="o">=&lt;/span>ACK &lt;span class="nv">len&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="m">8&lt;/span> &lt;span class="nv">ping&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="s2">&amp;#34;\x02\x04\x10\x10\t\x0e\a\a&amp;#34;&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">&lt;span class="o">(&lt;/span>at this point, I enabled airplane mode in the android emulator&lt;span class="o">)&lt;/span>...
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">2025/05/09 19:28:17 http2: Framer 0x14000200540: wrote PING &lt;span class="nv">len&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="m">8&lt;/span> &lt;span class="nv">ping&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="s2">&amp;#34;\x00\x00\x00\x00\x00\x00\x00\x00&amp;#34;&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">2025/05/09 19:28:32 Context cancelled
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">2025/05/09 19:28:32 Stream ended
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/td>&lt;/tr>&lt;/table>
+&lt;/div>
+&lt;/div>&lt;p>The server sends a PING frame at 19:28:17 to check the connection. After 15 seconds (our configured keepalive timeout) with no response, the server terminates the connection. This is exactly the behavior we want!&lt;/p>
+&lt;h3 id="the-nginx-surprise">The Nginx Surprise
+&lt;/h3>&lt;p>After successfully testing locally, I deployed the solution to our test environment. We use Ingress Nginx as our reverse proxy for backend services, which provides load balancing, security, rate limiting, and other features. However, when testing the keepalive mechanism in this environment, something unexpected happened.&lt;/p>
+&lt;p>Even with airplane mode enabled on the phone, &lt;strong>the server was still receiving ACK responses to its PING frames. This was confusing because we knew the client was disconnected, but the server thought the connection was still alive.&lt;/strong>&lt;/p>
+&lt;p align="center">
+&lt;img alt="WTF meme" src="https://media2.giphy.com/media/v1.Y2lkPTc5MGI3NjExZHY4OHlsZTR4Z3BpeWltaThtenN1NHYzb2kxb2hocDZ3aG5vMm43cSZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/b8RQzkElbBsXqEPF2X/giphy.gif" />
+&lt;/p>
+&lt;h3 id="reproducing-the-issue">Reproducing the Issue
+&lt;/h3>&lt;p>To better understand the problem, I used my toy project to reproduce the issue. I added an nginx proxy between the Android client and the server by running a Docker container with nginx, configured to forward traffic to my Go service.&lt;/p>
+&lt;p>Let&amp;rsquo;s start by running our Docker Compose setup:&lt;/p>
+&lt;div class="highlight">&lt;div class="chroma">
+&lt;table class="lntable">&lt;tr>&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code>&lt;span class="lnt">1
+&lt;/span>&lt;/code>&lt;/pre>&lt;/td>
+&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code class="language-bash" data-lang="bash">&lt;span class="line">&lt;span class="cl">docker-compose up --build
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/td>&lt;/tr>&lt;/table>
+&lt;/div>
+&lt;/div>&lt;h4 id="first-weird-behavior-missing-client-pings">First Weird Behavior: Missing Client Pings
+&lt;/h4>&lt;p>We immediately notice something strange - the server isn&amp;rsquo;t receiving the client&amp;rsquo;s ping frames:&lt;/p>
+&lt;div class="highlight">&lt;div class="chroma">
+&lt;table class="lntable">&lt;tr>&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code>&lt;span class="lnt">1
+&lt;/span>&lt;span class="lnt">2
+&lt;/span>&lt;span class="lnt">3
+&lt;/span>&lt;span class="lnt">4
+&lt;/span>&lt;span class="lnt">5
+&lt;/span>&lt;/code>&lt;/pre>&lt;/td>
+&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code class="language-bash" data-lang="bash">&lt;span class="line">&lt;span class="cl">grpc-server-1 &lt;span class="p">|&lt;/span> 2025/05/09 17:51:17 Received request: Hello Server!
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">grpc-server-1 &lt;span class="p">|&lt;/span> 2025/05/09 17:51:27 http2: Framer 0x40000e4540: wrote PING &lt;span class="nv">len&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="m">8&lt;/span> &lt;span class="nv">ping&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="s2">&amp;#34;\x00\x00\x00\x00\x00\x00\x00\x00&amp;#34;&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">grpc-server-1 &lt;span class="p">|&lt;/span> 2025/05/09 17:51:27 http2: Framer 0x40000e4540: &lt;span class="nb">read&lt;/span> PING &lt;span class="nv">flags&lt;/span>&lt;span class="o">=&lt;/span>ACK &lt;span class="nv">len&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="m">8&lt;/span> &lt;span class="nv">ping&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="s2">&amp;#34;\x00\x00\x00\x00\x00\x00\x00\x00&amp;#34;&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">grpc-server-1 &lt;span class="p">|&lt;/span> 2025/05/09 17:51:37 http2: Framer 0x40000e4540: wrote PING &lt;span class="nv">len&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="m">8&lt;/span> &lt;span class="nv">ping&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="s2">&amp;#34;\x00\x00\x00\x00\x00\x00\x00\x00&amp;#34;&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">grpc-server-1 &lt;span class="p">|&lt;/span> 2025/05/09 17:51:37 http2: Framer 0x40000e4540: &lt;span class="nb">read&lt;/span> PING &lt;span class="nv">flags&lt;/span>&lt;span class="o">=&lt;/span>ACK &lt;span class="nv">len&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="m">8&lt;/span> &lt;span class="nv">ping&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="s2">&amp;#34;\x00\x00\x00\x00\x00\x00\x00\x00&amp;#34;&lt;/span>
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/td>&lt;/tr>&lt;/table>
+&lt;/div>
+&lt;/div>&lt;p>Notice how we only see PINGs that the server is writing, and someone is sending ACKs. But who?&lt;/p>
+&lt;h4 id="the-mystery-deepens">The Mystery Deepens
+&lt;/h4>&lt;p>Let&amp;rsquo;s try enabling airplane mode on the phone. Surely we shouldn&amp;rsquo;t see any PING ACKs now, right?&lt;/p>
+&lt;div class="highlight">&lt;div class="chroma">
+&lt;table class="lntable">&lt;tr>&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code>&lt;span class="lnt">1
+&lt;/span>&lt;span class="lnt">2
+&lt;/span>&lt;span class="lnt">3
+&lt;/span>&lt;span class="lnt">4
+&lt;/span>&lt;span class="lnt">5
+&lt;/span>&lt;span class="lnt">6
+&lt;/span>&lt;span class="lnt">7
+&lt;/span>&lt;span class="lnt">8
+&lt;/span>&lt;/code>&lt;/pre>&lt;/td>
+&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code class="language-bash" data-lang="bash">&lt;span class="line">&lt;span class="cl">grpc-server-1 &lt;span class="p">|&lt;/span> 2025/05/09 17:53:50 Received request: Hello Server!
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">&lt;span class="o">(&lt;/span>I enabled airplane mode here&lt;span class="o">)&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">grpc-server-1 &lt;span class="p">|&lt;/span> 2025/05/09 17:54:00 http2: Framer 0x40000e4540: wrote PING &lt;span class="nv">len&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="m">8&lt;/span> &lt;span class="nv">ping&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="s2">&amp;#34;\x00\x00\x00\x00\x00\x00\x00\x00&amp;#34;&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">grpc-server-1 &lt;span class="p">|&lt;/span> 2025/05/09 17:54:00 http2: Framer 0x40000e4540: &lt;span class="nb">read&lt;/span> PING &lt;span class="nv">flags&lt;/span>&lt;span class="o">=&lt;/span>ACK &lt;span class="nv">len&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="m">8&lt;/span> &lt;span class="nv">ping&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="s2">&amp;#34;\x00\x00\x00\x00\x00\x00\x00\x00&amp;#34;&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">grpc-server-1 &lt;span class="p">|&lt;/span> 2025/05/09 17:54:10 http2: Framer 0x40000e4540: wrote PING &lt;span class="nv">len&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="m">8&lt;/span> &lt;span class="nv">ping&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="s2">&amp;#34;\x00\x00\x00\x00\x00\x00\x00\x00&amp;#34;&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">grpc-server-1 &lt;span class="p">|&lt;/span> 2025/05/09 17:54:10 http2: Framer 0x40000e4540: &lt;span class="nb">read&lt;/span> PING &lt;span class="nv">flags&lt;/span>&lt;span class="o">=&lt;/span>ACK &lt;span class="nv">len&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="m">8&lt;/span> &lt;span class="nv">ping&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="s2">&amp;#34;\x00\x00\x00\x00\x00\x00\x00\x00&amp;#34;&lt;/span>
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/td>&lt;/tr>&lt;/table>
+&lt;/div>
+&lt;/div>&lt;p align="center">
+&lt;img alt="Mystery meme" src="https://media1.tenor.com/m/0UBIdauP8CoAAAAC/iker-jimenez-misterioso.gif" />
+&lt;/p>
+&lt;p>Who is responding to the pings when the client has airplane mode enabled?&lt;/p>
+&lt;h3 id="the-investigation">The Investigation
+&lt;/h3>&lt;p>After some research, I found a &lt;a class="link" href="https://github.com/kubernetes/ingress-nginx/issues/4402" target="_blank" rel="noopener"
+>GitHub issue&lt;/a> where someone reported the same problem:&lt;/p>
+&lt;blockquote>
+&lt;p>&amp;ldquo;Currently my grpc server is doing keep alive ping each 10 seconds and ngnix proxy is doing ack of the ping but ngnix itself is not pinging client.&amp;rdquo;&lt;/p>&lt;/blockquote>
+&lt;p>However, there wasn&amp;rsquo;t a clear solution in that issue. Then I discovered an even older issue in the nginx issue tracker, &lt;a class="link" href="https://trac.nginx.org/nginx/ticket/1887" target="_blank" rel="noopener"
+>closed as &amp;ldquo;WONT FIX&amp;rdquo; from 5 years ago&lt;/a>.&lt;/p>
+&lt;p>The issue description was particularly relevant:&lt;/p>
+&lt;blockquote>
+&lt;p>&amp;ldquo;gRPC has multiple options for keepalive, which are especially relevant for streaming messages:&lt;/p>
+&lt;p>&lt;a class="link" href="https://github.com/grpc/grpc/blob/master/doc/keepalive.md" target="_blank" rel="noopener"
+>https://github.com/grpc/grpc/blob/master/doc/keepalive.md&lt;/a>&lt;/p>
+&lt;p>With these you are able to track disappearing clients and narrow connection latency. gRPC uses HTTP/2 ping messages for keepalives. When proxying through nginx, nginx does not passthrough ping messages to the client.&lt;/p>
+&lt;p>When using nginx with gRPC you currently have to implement a form of keepalive yourself. Send and receive timeouts from nginx are not helpful, as we use gRPC with long-lived streaming connections.&lt;/p>
+&lt;p>Possible solutions:&lt;/p>
+&lt;ol>
+&lt;li>Add an option to passthrough HTTP/2 ping messages to the gRPC backend: &lt;code>grpc_ping_passthrough yes/no&lt;/code>.&lt;/li>
+&lt;li>Add ability to send keepalive pings from nginx. In this case nginx would need additional options and nginx would have to terminate the connection if there is no response to the ping messages, similar to what gRPC does.&amp;rdquo;&lt;/li>
+&lt;/ol>&lt;/blockquote>
+&lt;h3 id="the-nginx-teams-response">The NGINX Team&amp;rsquo;s Response
+&lt;/h3>&lt;p>The NGINX team&amp;rsquo;s response was clear. They explained that using HTTP/2 pings to check client connectivity doesn&amp;rsquo;t work well with NGINX as a proxy because:&lt;/p>
+&lt;ol>
+&lt;li>A single connection to the backend may serve multiple clients (especially with HTTP/2 multiplexing)&lt;/li>
+&lt;li>There&amp;rsquo;s no persistent connection between the client and the backend unless there&amp;rsquo;s an active request&lt;/li>
+&lt;li>Multiple simultaneous client requests mean multiple client-server connections&lt;/li>
+&lt;/ol>
+&lt;p>Their conclusion was straightforward: HTTP/2 pings only help verify direct (peer-to-peer) connections, not end-to-end connectivity through a proxy.&lt;/p>
+&lt;h3 id="the-tcp-keepalive-alternative">The TCP Keepalive Alternative
+&lt;/h3>&lt;p>As a possible solution, they mentioned using TCP keepalive. However, I rejected this idea because TCP keepalive is notoriously difficult to maintain, with many edge cases to handle and debug. For a great example of these challenges, you can read this &lt;a class="link" href="https://blog.cloudflare.com/when-tcp-sockets-refuse-to-die/" target="_blank" rel="noopener"
+>insightful post from Cloudflare&lt;/a>.&lt;/p>
+&lt;h2 id="the-problem">The Problem
+&lt;/h2>&lt;p>The standard gRPC keepalive mechanism relies on HTTP/2 ping frames to maintain connection health. However, when using Nginx as a proxy, these ping frames don&amp;rsquo;t work as expected. Nginx acknowledges (ACKs) these ping frames instead of forwarding them, effectively breaking the keepalive mechanism. This creates a situation where:&lt;/p>
+&lt;ol>
+&lt;li>The client sends HTTP/2 ping frames&lt;/li>
+&lt;li>Nginx receives and acknowledges these pings&lt;/li>
+&lt;li>The actual gRPC server never sees these pings&lt;/li>
+&lt;li>The connection health check fails&lt;/li>
+&lt;/ol>
+&lt;p>Since the gRPC keepalive can be enabled on the server side as well, it creates an opposite situation:&lt;/p>
+&lt;ol>
+&lt;li>The client connection is lost&lt;/li>
+&lt;li>The server sends keepalive pings to the (supposedly) client&lt;/li>
+&lt;li>Nginx acknowledges these pings&lt;/li>
+&lt;li>The server thinks the connection is still alive and keeps it open&lt;/li>
+&lt;/ol>
+&lt;h2 id="the-failed-partial-workaround">The Failed Partial Workaround
+&lt;/h2>&lt;p>To be completely honest, my first thought was to get rid of Nginx. But I can&amp;rsquo;t just remove the reverse proxy. Maybe some other proxy would behave differently and forward PING frames?&lt;/p>
+&lt;p>But nope, I tried Envoy proxy and it behaves the same way: it just ACKs the PING frames.&lt;/p>
+&lt;h3 id="the-server-side-ping-attempt">The Server-Side Ping Attempt
+&lt;/h3>&lt;p>As a reminder, my stream is unidirectional - the server notifies the client about some messages, but the client can&amp;rsquo;t send any data (apart from the first request to establish the connection). So I had this great idea: The server should send frequent gRPC messages that act as a ping, and if it fails to send many of those messages, then I should be able to detect it and terminate the connection. That sounds easy.&lt;/p>
+&lt;p>But, after trying it&amp;hellip; another dead end. Even with the client on airplane mode, my server was happily sending gRPC messages to the stream, and nothing happened - the client obviously didn&amp;rsquo;t receive any message, but the server wouldn&amp;rsquo;t complain. It was almost like someone was queuing those messages in a buffer and sending them when the client is available&amp;hellip;&lt;/p>
+&lt;h3 id="the-nginx-buffering-discovery">The Nginx Buffering Discovery
+&lt;/h3>&lt;p>That was my theory, and I was correct. It seems that Nginx (as a good citizen) buffers the messages and forwards them when it can (&lt;a class="link" href="https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_buffering" target="_blank" rel="noopener"
+>documentation&lt;/a>). I thought about disabling this buffering, since it is possible to do so, but I discarded that idea - The server has many gRPC endpoints apart from this one, and I don&amp;rsquo;t want to lose the buffering benefits just for this use case. There had to be another way&amp;hellip;&lt;/p>
+&lt;h2 id="the-successful-workaround">The Successful Workaround
+&lt;/h2>&lt;p>So, this is what finally worked 🎊: a mechanism that relies on the client sending pings, and the server responding to these pings, all using gRPC messages. This approach:&lt;/p>
+&lt;ol>
+&lt;li>Uses standard gRPC messages instead of HTTP/2 ping frames&lt;/li>
+&lt;li>Can be properly proxied by Nginx&lt;/li>
+&lt;li>Maintains (almost) the same functionality as the built-in keepalive mechanism&lt;/li>
+&lt;/ol>
+&lt;h2 id="implementation-details">Implementation Details
+&lt;/h2>&lt;p>I&amp;rsquo;ve created a demonstration repository that shows how to implement this custom keepalive mechanism: &lt;a class="link" href="https://github.com/hectorgabucio/nginx-hates-grpc-keepalive" target="_blank" rel="noopener"
+>nginx-hates-grpc-keepalive&lt;/a>.&lt;/p>
+&lt;p>This work-around introduced a breaking change in my original stream: I can&amp;rsquo;t just rely on a unidirectional server-stream. I actually need a bidirectional stream, where both client and server can send and receive ping requests.&lt;/p>
+&lt;p>This is the proto definition of the contract:&lt;/p>
+&lt;div class="highlight">&lt;div class="chroma">
+&lt;table class="lntable">&lt;tr>&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code>&lt;span class="lnt"> 1
+&lt;/span>&lt;span class="lnt"> 2
+&lt;/span>&lt;span class="lnt"> 3
+&lt;/span>&lt;span class="lnt"> 4
+&lt;/span>&lt;span class="lnt"> 5
+&lt;/span>&lt;span class="lnt"> 6
+&lt;/span>&lt;span class="lnt"> 7
+&lt;/span>&lt;span class="lnt"> 8
+&lt;/span>&lt;span class="lnt"> 9
+&lt;/span>&lt;span class="lnt">10
+&lt;/span>&lt;span class="lnt">11
+&lt;/span>&lt;span class="lnt">12
+&lt;/span>&lt;span class="lnt">13
+&lt;/span>&lt;span class="lnt">14
+&lt;/span>&lt;span class="lnt">15
+&lt;/span>&lt;span class="lnt">16
+&lt;/span>&lt;span class="lnt">17
+&lt;/span>&lt;span class="lnt">18
+&lt;/span>&lt;span class="lnt">19
+&lt;/span>&lt;span class="lnt">20
+&lt;/span>&lt;span class="lnt">21
+&lt;/span>&lt;span class="lnt">22
+&lt;/span>&lt;span class="lnt">23
+&lt;/span>&lt;span class="lnt">24
+&lt;/span>&lt;span class="lnt">25
+&lt;/span>&lt;span class="lnt">26
+&lt;/span>&lt;span class="lnt">27
+&lt;/span>&lt;span class="lnt">28
+&lt;/span>&lt;span class="lnt">29
+&lt;/span>&lt;span class="lnt">30
+&lt;/span>&lt;span class="lnt">31
+&lt;/span>&lt;/code>&lt;/pre>&lt;/td>
+&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code class="language-proto" data-lang="proto">&lt;span class="line">&lt;span class="cl">&lt;span class="kd">service&lt;/span> &lt;span class="n">StreamService&lt;/span> &lt;span class="p">{&lt;/span>&lt;span class="err">
+&lt;/span>&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">&lt;span class="err">&lt;/span> &lt;span class="c1">// Bidirectional streaming RPC
+&lt;/span>&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">&lt;span class="c1">&lt;/span> &lt;span class="k">rpc&lt;/span> &lt;span class="n">Stream&lt;/span> &lt;span class="p">(&lt;/span>&lt;span class="n">stream&lt;/span> &lt;span class="n">StreamMessage&lt;/span>&lt;span class="p">)&lt;/span> &lt;span class="k">returns&lt;/span> &lt;span class="p">(&lt;/span>&lt;span class="n">stream&lt;/span> &lt;span class="n">StreamMessage&lt;/span>&lt;span class="p">)&lt;/span> &lt;span class="p">{}&lt;/span>&lt;span class="err">
+&lt;/span>&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">&lt;span class="err">&lt;/span>&lt;span class="p">}&lt;/span>&lt;span class="err">
+&lt;/span>&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">&lt;span class="err">
+&lt;/span>&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">&lt;span class="err">&lt;/span>&lt;span class="kd">message&lt;/span> &lt;span class="nc">StreamMessage&lt;/span> &lt;span class="p">{&lt;/span>&lt;span class="err">
+&lt;/span>&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">&lt;span class="err">&lt;/span> &lt;span class="k">oneof&lt;/span> &lt;span class="n">content&lt;/span> &lt;span class="p">{&lt;/span>&lt;span class="err">
+&lt;/span>&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">&lt;span class="err">&lt;/span> &lt;span class="n">StreamRequest&lt;/span> &lt;span class="n">request&lt;/span> &lt;span class="o">=&lt;/span> &lt;span class="mi">1&lt;/span>&lt;span class="p">;&lt;/span>&lt;span class="err">
+&lt;/span>&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">&lt;span class="err">&lt;/span> &lt;span class="n">StreamResponse&lt;/span> &lt;span class="n">response&lt;/span> &lt;span class="o">=&lt;/span> &lt;span class="mi">2&lt;/span>&lt;span class="p">;&lt;/span>&lt;span class="err">
+&lt;/span>&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">&lt;span class="err">&lt;/span> &lt;span class="n">Ping&lt;/span> &lt;span class="n">ping&lt;/span> &lt;span class="o">=&lt;/span> &lt;span class="mi">3&lt;/span>&lt;span class="p">;&lt;/span>&lt;span class="err">
+&lt;/span>&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">&lt;span class="err">&lt;/span> &lt;span class="n">Pong&lt;/span> &lt;span class="n">pong&lt;/span> &lt;span class="o">=&lt;/span> &lt;span class="mi">4&lt;/span>&lt;span class="p">;&lt;/span>&lt;span class="err">
+&lt;/span>&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">&lt;span class="err">&lt;/span> &lt;span class="p">}&lt;/span>&lt;span class="err">
+&lt;/span>&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">&lt;span class="err">&lt;/span>&lt;span class="p">}&lt;/span>&lt;span class="err">
+&lt;/span>&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">&lt;span class="err">
+&lt;/span>&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">&lt;span class="err">&lt;/span>&lt;span class="kd">message&lt;/span> &lt;span class="nc">StreamRequest&lt;/span> &lt;span class="p">{&lt;/span>&lt;span class="err">
+&lt;/span>&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">&lt;span class="err">&lt;/span> &lt;span class="kt">string&lt;/span> &lt;span class="n">query&lt;/span> &lt;span class="o">=&lt;/span> &lt;span class="mi">1&lt;/span>&lt;span class="p">;&lt;/span>&lt;span class="err">
+&lt;/span>&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">&lt;span class="err">&lt;/span>&lt;span class="p">}&lt;/span>&lt;span class="err">
+&lt;/span>&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">&lt;span class="err">
+&lt;/span>&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">&lt;span class="err">&lt;/span>&lt;span class="kd">message&lt;/span> &lt;span class="nc">StreamResponse&lt;/span> &lt;span class="p">{&lt;/span>&lt;span class="err">
+&lt;/span>&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">&lt;span class="err">&lt;/span> &lt;span class="kt">string&lt;/span> &lt;span class="kd">message&lt;/span> &lt;span class="o">=&lt;/span> &lt;span class="mi">1&lt;/span>&lt;span class="p">;&lt;/span>&lt;span class="err">
+&lt;/span>&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">&lt;span class="err">&lt;/span> &lt;span class="kt">int32&lt;/span> &lt;span class="n">index&lt;/span> &lt;span class="o">=&lt;/span> &lt;span class="mi">2&lt;/span>&lt;span class="p">;&lt;/span>&lt;span class="err">
+&lt;/span>&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">&lt;span class="err">&lt;/span>&lt;span class="p">}&lt;/span>&lt;span class="err">
+&lt;/span>&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">&lt;span class="err">
+&lt;/span>&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">&lt;span class="err">&lt;/span>&lt;span class="kd">message&lt;/span> &lt;span class="nc">Ping&lt;/span> &lt;span class="p">{&lt;/span>&lt;span class="err">
+&lt;/span>&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">&lt;span class="err">&lt;/span> &lt;span class="kt">int64&lt;/span> &lt;span class="n">timestamp&lt;/span> &lt;span class="o">=&lt;/span> &lt;span class="mi">1&lt;/span>&lt;span class="p">;&lt;/span>&lt;span class="err">
+&lt;/span>&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">&lt;span class="err">&lt;/span>&lt;span class="p">}&lt;/span>&lt;span class="err">
+&lt;/span>&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">&lt;span class="err">
+&lt;/span>&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">&lt;span class="err">&lt;/span>&lt;span class="kd">message&lt;/span> &lt;span class="nc">Pong&lt;/span> &lt;span class="p">{&lt;/span>&lt;span class="err">
+&lt;/span>&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">&lt;span class="err">&lt;/span> &lt;span class="kt">int64&lt;/span> &lt;span class="n">original_timestamp&lt;/span> &lt;span class="o">=&lt;/span> &lt;span class="mi">1&lt;/span>&lt;span class="p">;&lt;/span>&lt;span class="err">
+&lt;/span>&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">&lt;span class="err">&lt;/span> &lt;span class="kt">int64&lt;/span> &lt;span class="n">server_timestamp&lt;/span> &lt;span class="o">=&lt;/span> &lt;span class="mi">2&lt;/span>&lt;span class="p">;&lt;/span>&lt;span class="err">
+&lt;/span>&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">&lt;span class="err">&lt;/span>&lt;span class="p">}&lt;/span>&lt;span class="err">
+&lt;/span>&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/td>&lt;/tr>&lt;/table>
+&lt;/div>
+&lt;/div>&lt;p>Please note the &lt;code>Ping&lt;/code> and &lt;code>Pong&lt;/code> messages: those are part of our home-made keepalive system.&lt;/p>
+&lt;p>The custom ping mechanism works as follows:&lt;/p>
+&lt;ol>
+&lt;li>
+&lt;p>&lt;strong>Client-side behavior:&lt;/strong>&lt;/p>
+&lt;ul>
+&lt;li>Sends frequent ping messages to the server (StreamMessage with content Ping)&lt;/li>
+&lt;li>Expects a ping reply from the server (StreamMessage with content Pong)&lt;/li>
+&lt;li>Terminates the connection if no reply is received within a reasonable timeframe&lt;/li>
+&lt;/ul>
+&lt;/li>
+&lt;li>
+&lt;p>&lt;strong>Server-side behavior:&lt;/strong>&lt;/p>
+&lt;ul>
+&lt;li>Monitors incoming ping messages from the client (StreamMessage with content Ping) and replies (StreamMessage with content Pong)&lt;/li>
+&lt;li>Terminates the connection if no pings are received within the expected interval&lt;/li>
+&lt;/ul>
+&lt;/li>
+&lt;/ol>
+&lt;p>This bidirectional ping mechanism ensures both sides can detect connection issues and take appropriate action.&lt;/p>
+&lt;p>It is really simple to maintain and it works great - Nginx will forward these messages since they&amp;rsquo;re just gRPC messages. However, there are two important considerations to keep in mind:&lt;/p>
+&lt;h3 id="ping-frequency">Ping Frequency
+&lt;/h3>&lt;p>Finding the right balance for ping frequency is crucial:&lt;/p>
+&lt;ul>
+&lt;li>Too frequent pings: Unnecessary network overhead and server load&lt;/li>
+&lt;li>Too infrequent pings: Delayed detection of connection issues&lt;/li>
+&lt;li>Recommended: Start with 10-second intervals and adjust based on your needs&lt;/li>
+&lt;/ul>
+&lt;h3 id="security-considerations">Security Considerations
+&lt;/h3>&lt;p>Even with authentication in place, you need to protect against potential abuse:&lt;/p>
+&lt;ol>
+&lt;li>
+&lt;p>&lt;strong>Rate Limiting&lt;/strong>&lt;/p>
+&lt;ul>
+&lt;li>Implement a rate limiter per connection&lt;/li>
+&lt;li>Example: Limit to 10 pings per 10-second window&lt;/li>
+&lt;li>Terminate connections that exceed the limit&lt;/li>
+&lt;li>This prevents DoS attacks from authenticated clients&lt;/li>
+&lt;/ul>
+&lt;/li>
+&lt;li>
+&lt;p>&lt;strong>Why It&amp;rsquo;s Necessary&lt;/strong>&lt;/p>
+&lt;ul>
+&lt;li>Authentication only protects against unauthorized access&lt;/li>
+&lt;li>Once authenticated, clients can still send excessive pings&lt;/li>
+&lt;li>Without rate limiting, a single client could overwhelm your server&lt;/li>
+&lt;li>This is especially important for public-facing services&lt;/li>
+&lt;/ul>
+&lt;/li>
+&lt;/ol>
+&lt;h2 id="conclusion">Conclusion
+&lt;/h2>&lt;p>This journey through implementing gRPC keepalive with Nginx has taught me several important lessons:&lt;/p>
+&lt;ol>
+&lt;li>
+&lt;p>&lt;strong>HTTP/2 Pings Don&amp;rsquo;t Work with Proxies&lt;/strong>&lt;/p>
+&lt;ul>
+&lt;li>Nginx and Envoy both ACK HTTP/2 ping frames instead of forwarding them&lt;/li>
+&lt;li>This breaks the standard gRPC keepalive mechanism&lt;/li>
+&lt;li>The issue is well-documented but marked as &amp;ldquo;WONT FIX&amp;rdquo; by the Nginx team&lt;/li>
+&lt;/ul>
+&lt;/li>
+&lt;li>
+&lt;p>&lt;strong>Server-Side Pings Aren&amp;rsquo;t Reliable&lt;/strong>&lt;/p>
+&lt;ul>
+&lt;li>Nginx&amp;rsquo;s buffering behavior makes server-side ping detection unreliable&lt;/li>
+&lt;li>Messages get queued even when the client is disconnected&lt;/li>
+&lt;li>Disabling buffering isn&amp;rsquo;t a viable solution for most setups&lt;/li>
+&lt;/ul>
+&lt;/li>
+&lt;li>
+&lt;p>&lt;strong>The Solution: Client-Initiated Pings&lt;/strong>&lt;/p>
+&lt;ul>
+&lt;li>Using regular gRPC messages for keepalive works reliably&lt;/li>
+&lt;li>The client sends pings, and the server responds&lt;/li>
+&lt;li>Nginx properly forwards these messages&lt;/li>
+&lt;li>We get the same functionality as built-in keepalive&lt;/li>
+&lt;/ul>
+&lt;/li>
+&lt;li>
+&lt;p>&lt;strong>Important Considerations&lt;/strong>&lt;/p>
+&lt;ul>
+&lt;li>Need to implement proper rate limiting&lt;/li>
+&lt;li>Must balance ping frequency&lt;/li>
+&lt;li>Should monitor connection health&lt;/li>
+&lt;li>Requires bidirectional streams&lt;/li>
+&lt;/ul>
+&lt;/li>
+&lt;/ol>
+&lt;p>While not ideal, this workaround provides a reliable solution for maintaining healthy gRPC connections through Nginx proxies. It&amp;rsquo;s a good example of how sometimes we need to think outside the box when working with complex infrastructure setups, especially when dealing with mobile clients that may have unreliable connections.&lt;/p>
+&lt;p>For a complete implementation example, check out the &lt;a class="link" href="https://github.com/hectorgabucio/nginx-hates-grpc-keepalive" target="_blank" rel="noopener"
+>nginx-hates-grpc-keepalive&lt;/a> repository. Feel free to play with it - enable gRPC pings, try it with the Nginx or Envoy proxy, etc. 🚀&lt;/p>
+&lt;h2 id="thoughts">Thoughts
+&lt;/h2>&lt;p>While gRPC&amp;rsquo;s built-in keepalive mechanism works perfectly for direct client-server communication, this scenario is rare in production environments. In reality, 99% of deployments use load balancers, proxies, and other infrastructure components.&lt;/p>
+&lt;p>The proxy teams&amp;rsquo; decision to respond to HTTP/2 PING frames with ACKs makes perfect sense from their perspective. However, this creates a challenge for gRPC&amp;rsquo;s keepalive mechanism, which relies on these standard HTTP/2 frames.&lt;/p>
+&lt;p>I believe gRPC should reconsider its keepalive implementation. Instead of relying on HTTP/2 standard frames, it could use gRPC standard messages for health checks. This would make it much easier to implement reliable connection monitoring in real-world scenarios, especially for:&lt;/p>
+&lt;ul>
+&lt;li>Long-lasting stream connections&lt;/li>
+&lt;li>Mobile client applications&lt;/li>
+&lt;li>Real-time data updates (similar to WebSocket functionality)&lt;/li>
+&lt;li>Production environments with complex infrastructure&lt;/li>
+&lt;/ul>
+&lt;p>In my case, this would have simplified the implementation of real-time notifications for mobile clients about relevant data changes. The current workaround works, but a native solution would be more elegant and maintainable.&lt;/p></description></item></channel></rss>
